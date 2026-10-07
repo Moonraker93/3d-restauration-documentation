@@ -60,3 +60,7 @@ model/<name>      # the original 3D model file
 - Area values are the sum of the triangle fan spanning the picked outline points (a surface-patch approximation).
 - LAS/LAZ and E57 laser-scan formats are not yet supported (convert to PLY/XYZ first).
 - Units are whatever your model uses; set the unit label (default `m`) in the top bar so reports read correctly.
+
+## License
+
+[MIT](LICENSE) — free to use, modify and distribute. All dependencies are open source as well (see the table above).
