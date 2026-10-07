@@ -1,0 +1,30 @@
+{
+  "name": "artwork-annotator-3d",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "description": "Web app for annotating and mapping damage on 3D digitized artworks (conservation documentation).",
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc --noEmit && vite build",
+    "preview": "vite preview"
+  },
+  "dependencies": {
+    "jspdf": "^4.2.1",
+    "jszip": "^3.10.1",
+    "lucide-react": "^0.545.0",
+    "react": "^19.1.0",
+    "react-dom": "^19.1.0",
+    "three": "^0.180.0",
+    "three-mesh-bvh": "^0.9.0",
+    "zustand": "^5.0.6"
+  },
+  "devDependencies": {
+    "@types/react": "^19.1.0",
+    "@types/react-dom": "^19.1.0",
+    "@types/three": "^0.180.0",
+    "@vitejs/plugin-react": "^5.0.0",
+    "typescript": "^5.9.2",
+    "vite": "^7.1.0"
+  }
+}
