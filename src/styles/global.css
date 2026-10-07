@@ -258,7 +258,8 @@ textarea {
   font-size: 11px;
   color: #f3f4f6;
   white-space: nowrap;
-  pointer-events: none;
+  pointer-events: auto;
+  cursor: pointer;
 }
 
 .annotation-label.selected {
@@ -407,6 +408,8 @@ textarea {
 
 .anno-row {
   display: flex;
+  flex: 1;
+  min-width: 0;
   width: 100%;
   align-items: center;
   gap: 8px;
@@ -425,9 +428,34 @@ textarea {
   background: var(--bg-elevated);
 }
 
-.anno-row.selected {
+.anno-item {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  border-radius: 6px;
+}
+
+.anno-item.selected {
   background: rgba(34, 211, 238, 0.12);
   outline: 1px solid var(--accent-dark);
+}
+
+.anno-item.muted .anno-row,
+.anno-group-header.muted .swatch,
+.anno-group-header.muted .anno-group-name {
+  opacity: 0.45;
+}
+
+.anno-group-name {
+  flex: 1;
+}
+
+.anno-group-header .icon-btn {
+  padding: 2px;
+}
+
+.icon-btn.active {
+  color: var(--accent);
 }
 
 .anno-label-text {

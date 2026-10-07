@@ -3,7 +3,7 @@ import { MeshStandardNodeMaterial, PointsNodeMaterial, WebGPURenderer } from 'th
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 import { CSS2DObject, CSS2DRenderer } from 'three/addons/renderers/CSS2DRenderer.js';
 import { acceleratedRaycast, computeBoundsTree, disposeBoundsTree } from 'three-mesh-bvh';
-import { formatValue, type Annotation, type DamageLayer, type Vec3Tuple } from '../types/project';
+import { formatValue, pathLength, type Annotation, type DamageLayer, type Vec3Tuple } from '../types/project';
 
 // Enable BVH-accelerated raycasting for fast picking on dense scans.
 THREE.BufferGeometry.prototype.computeBoundsTree = computeBoundsTree;
@@ -34,6 +34,21 @@ function disposeObject(root: THREE.Object3D): void {
 /** True when a material is a WebGPU node material (not a classic material). */
 function isNodeMaterial(m: THREE.Material): boolean {
   return (m as unknown as { isNodeMaterial?: boolean }).isNodeMaterial === true;
+}
+
+/** Point halfway along an open polyline (by arc length) — used for label placement. */
+function polylineMidpoint(points: THREE.Vector3[]): THREE.Vector3 {
+  let total = 0;
+  for (let i = 1; i < points.length; i++) total += points[i - 1].distanceTo(points[i]);
+  let walked = 0;
+  for (let i = 1; i < points.length; i++) {
+    const segment = points[i - 1].distanceTo(points[i]);
+    if (segment > 0 && walked + segment >= total / 2) {
+      return points[i - 1].clone().lerp(points[i], (total / 2 - walked) / segment);
+    }
+    walked += segment;
+  }
+  return points[points.length - 1].clone();
 }
 
 /** Convert a classic lit material to the WebGPU node equivalent, preserving color/maps. */
@@ -89,10 +104,14 @@ export class SceneManager {
   private modelRoot: THREE.Group | null = null;
   private annotationRoot = new THREE.Group();
   private pendingRoot = new THREE.Group();
+  private editRoot = new THREE.Group();
   private resizeObserver: ResizeObserver | null = null;
   private markerRadius = 0.01;
   private modelRadius = 1;
   private ready = false;
+  private labelsDirty = true;
+  private lastCameraMatrix = new THREE.Matrix4();
+  private lastModelRoot: THREE.Group | null = null;
 
   constructor(container: HTMLElement) {
     this.container = container;
@@ -135,7 +154,7 @@ export class SceneManager {
     fill.position.set(-4, -2, -3);
     const rim = new THREE.DirectionalLight(0xffffff, 0.8);
     rim.position.set(0, -3, -5);
-    this.scene.add(hemisphere, key, fill, rim, this.annotationRoot, this.pendingRoot);
+    this.scene.add(hemisphere, key, fill, rim, this.annotationRoot, this.pendingRoot, this.editRoot);
 
     this.raycaster.firstHitOnly = true;
 
@@ -240,12 +259,51 @@ export class SceneManager {
     unit: string,
   ): void {
     this.clearGroup(this.annotationRoot);
+    this.labelsDirty = true;
     const layerById = new Map(layers.map((l) => [l.id, l]));
     for (const annotation of annotations) {
       const layer = layerById.get(annotation.layerId);
-      if (layer && !layer.visible) continue;
-      this.annotationRoot.add(this.buildAnnotation(annotation, layer, annotation.id === selectedId, unit));
+      if ((layer && !layer.visible) || annotation.hidden) continue;
+      const group = this.buildAnnotation(annotation, layer, annotation.id === selectedId, unit);
+      // Lets the UI map a clicked label back to its annotation.
+      group.traverse((obj) => {
+        if (obj instanceof CSS2DObject) obj.element.dataset.annotationId = annotation.id;
+      });
+      this.annotationRoot.add(group);
     }
+  }
+
+  /** Show draggable node handles for shape editing (null clears them). */
+  setEditHandles(points: Vec3Tuple[] | null): void {
+    this.clearGroup(this.editRoot);
+    if (!points) return;
+    const color = new THREE.Color('#ffffff');
+    points.forEach((p, index) => {
+      const handle = this.makeMarker(new THREE.Vector3(...p), color, 1.9);
+      handle.userData.handleIndex = index;
+      this.editRoot.add(handle);
+    });
+  }
+
+  /** Index of the edit handle under the pointer, or null. Occluded handles are ignored. */
+  pickHandle(clientX: number, clientY: number): number | null {
+    if (!this.ready || this.editRoot.children.length === 0) return null;
+    const rect = this.canvas.getBoundingClientRect();
+    if (rect.width === 0 || rect.height === 0) return null;
+    const ndc = new THREE.Vector2(
+      ((clientX - rect.left) / rect.width) * 2 - 1,
+      -((clientY - rect.top) / rect.height) * 2 + 1,
+    );
+    this.raycaster.setFromCamera(ndc, this.camera);
+    const handleHit = this.raycaster.intersectObjects(this.editRoot.children, false)[0];
+    if (!handleHit) return null;
+    const modelHit = this.modelRoot ? this.raycaster.intersectObject(this.modelRoot, true)[0] : null;
+    if (modelHit && modelHit.distance < handleHit.distance - this.markerRadius * 3) return null;
+    return handleHit.object.userData.handleIndex as number;
+  }
+
+  setControlsEnabled(enabled: boolean): void {
+    if (this.controls) this.controls.enabled = enabled;
   }
 
   /** Preview visuals for the in-progress measurement/area outline. */
@@ -296,6 +354,7 @@ export class SceneManager {
     if (this.modelRoot) disposeObject(this.modelRoot);
     disposeObject(this.annotationRoot);
     disposeObject(this.pendingRoot);
+    disposeObject(this.editRoot);
     this.renderer?.dispose();
     this.canvas.remove();
     this.labelRenderer?.domElement.remove();
@@ -307,7 +366,43 @@ export class SceneManager {
     if (!this.ready) return;
     this.controls.update();
     this.renderer.render(this.scene, this.camera);
+    this.updateLabelOcclusion();
     this.labelRenderer.render(this.scene, this.camera);
+  }
+
+  /** Hide labels whose anchor point is hidden behind the model from the camera. */
+  private updateLabelOcclusion(): void {
+    this.camera.updateMatrixWorld();
+    const unchanged =
+      !this.labelsDirty &&
+      this.lastCameraMatrix.equals(this.camera.matrixWorld) &&
+      this.lastModelRoot === this.modelRoot;
+    if (unchanged) return;
+    this.labelsDirty = false;
+    this.lastCameraMatrix.copy(this.camera.matrixWorld);
+    this.lastModelRoot = this.modelRoot;
+
+    const origin = this.camera.position;
+    const savedFar = this.raycaster.far;
+    const savedNear = this.raycaster.near;
+    this.annotationRoot.traverse((obj) => {
+      const anchor = obj.userData.occlusionPoint as THREE.Vector3 | undefined;
+      if (!anchor) return;
+      if (!this.modelRoot) {
+        obj.visible = true;
+        return;
+      }
+      const dir = anchor.clone().sub(origin);
+      const distance = dir.length();
+      this.raycaster.set(origin, dir.normalize());
+      this.raycaster.near = 0;
+      this.raycaster.far = distance;
+      const hit = this.raycaster.intersectObject(this.modelRoot, true)[0];
+      // The anchor sits on the surface, so only hits clearly in front of it count as occlusion.
+      obj.visible = !hit || hit.distance >= distance - this.markerRadius * 3;
+    });
+    this.raycaster.near = savedNear;
+    this.raycaster.far = savedFar;
   }
 
   private onResize(): void {
@@ -348,6 +443,7 @@ export class SceneManager {
     const label = new CSS2DObject(div);
     label.position.copy(anchor);
     label.position.y += this.markerRadius * 2.5;
+    label.userData.occlusionPoint = anchor.clone();
     return label;
   }
 
@@ -397,6 +493,17 @@ export class SceneManager {
       );
       const mid = points[0].clone().add(points[1]).multiplyScalar(0.5);
       const value = annotation.distance ?? points[0].distanceTo(points[1]);
+      group.add(this.makeLabel(`${annotation.label} · ${formatValue(value)} ${unit}`, colorHex, mid, selected));
+      return group;
+    }
+
+    if (annotation.kind === 'path' && points.length >= 2) {
+      points.forEach((p) => group.add(this.makeMarker(p, color, markerScale * 0.8)));
+      group.add(
+        new THREE.Line(new THREE.BufferGeometry().setFromPoints(points), new THREE.LineBasicMaterial({ color })),
+      );
+      const mid = polylineMidpoint(points);
+      const value = annotation.distance ?? pathLength(annotation.points);
       group.add(this.makeLabel(`${annotation.label} · ${formatValue(value)} ${unit}`, colorHex, mid, selected));
       return group;
     }

@@ -4,8 +4,10 @@ import {
   LAYER_COLOR_PALETTE,
   distance3D,
   kindName,
+  pathLength,
   polygonArea3D,
   uid,
+  withPoints,
   type Annotation,
   type AnnotationKind,
   type DamageLayer,
@@ -25,6 +27,15 @@ export interface AppState {
   activeTool: Tool;
   pendingPoints: Vec3Tuple[];
   selectedId: string | null;
+  /** Layer that receives newly created annotations. */
+  activeLayerId: string | null;
+  /** Shape edit mode: the annotation being reshaped and its draft node positions. */
+  editing: { id: string; points: Vec3Tuple[] } | null;
+
+  startEditing: (id: string) => void;
+  moveEditPoint: (index: number, p: Vec3Tuple) => void;
+  commitEditing: () => void;
+  cancelEditing: () => void;
 
   newProject: (name?: string) => void;
   loadProject: (data: ProjectData) => void;
@@ -33,11 +44,14 @@ export interface AppState {
   setUnit: (unit: string) => void;
   setTool: (tool: Tool) => void;
   selectAnnotation: (id: string | null) => void;
+  setActiveLayer: (id: string) => void;
+  setAnnotationHidden: (id: string, hidden: boolean) => void;
 
   addPendingPoint: (p: Vec3Tuple) => void;
   undoPendingPoint: () => void;
   clearPending: () => void;
   completeArea: () => void;
+  completePath: () => void;
   addPointAnnotation: (p: Vec3Tuple) => void;
 
   updateAnnotation: (id: string, patch: Partial<Pick<Annotation, 'label' | 'notes' | 'layerId'>>) => void;
@@ -58,9 +72,10 @@ export const useAppStore = create<AppState>()((set, get) => {
     if (state.layers.length === 0) return;
     const count = state.annotations.filter((a) => a.kind === kind).length + 1;
     const preferredLayer =
-      kind === 'point'
+      state.layers.find((l) => l.id === state.activeLayerId) ??
+      (kind === 'point'
         ? (state.layers.find((l) => /general|note/i.test(l.name)) ?? state.layers[0])
-        : state.layers[0];
+        : state.layers[0]);
     const annotation: Annotation = {
       id: uid(),
       layerId: preferredLayer.id,
@@ -72,6 +87,9 @@ export const useAppStore = create<AppState>()((set, get) => {
     };
     if (kind === 'measure' && points.length >= 2) {
       annotation.distance = distance3D(points[0], points[1]);
+    }
+    if (kind === 'path' && points.length >= 2) {
+      annotation.distance = pathLength(points);
     }
     if (kind === 'area') {
       annotation.area = polygonArea3D(points);
@@ -90,20 +108,55 @@ export const useAppStore = create<AppState>()((set, get) => {
     activeTool: 'navigate',
     pendingPoints: [],
     selectedId: null,
+    activeLayerId: null,
+    editing: null,
 
-    newProject: (name = 'Untitled project') =>
+    startEditing: (id) => {
+      const annotation = get().annotations.find((a) => a.id === id);
+      if (!annotation) return;
+      set({
+        editing: { id, points: annotation.points.map((p) => [...p] as Vec3Tuple) },
+        selectedId: id,
+        activeTool: 'navigate',
+        pendingPoints: [],
+      });
+    },
+
+    moveEditPoint: (index, p) =>
+      set((state) => {
+        if (!state.editing) return {};
+        const points = state.editing.points.map((q, i) => (i === index ? p : q));
+        return { editing: { ...state.editing, points } };
+      }),
+
+    commitEditing: () => {
+      const { editing, annotations } = get();
+      if (!editing) return;
+      set({
+        annotations: annotations.map((a) => (a.id === editing.id ? withPoints(a, editing.points) : a)),
+        editing: null,
+      });
+    },
+
+    cancelEditing: () => set({ editing: null }),
+
+    newProject: (name = 'Untitled project') => {
+      const layers = makeDefaultLayers();
       set({
         projectName: name,
         unit: 'm',
         createdAt: new Date().toISOString(),
         hasModel: false,
         modelName: null,
-        layers: makeDefaultLayers(),
+        layers,
         annotations: [],
         activeTool: 'navigate',
         pendingPoints: [],
         selectedId: null,
-      }),
+        activeLayerId: layers[0]?.id ?? null,
+        editing: null,
+      });
+    },
 
     loadProject: (data) =>
       set({
@@ -117,14 +170,23 @@ export const useAppStore = create<AppState>()((set, get) => {
         activeTool: 'navigate',
         pendingPoints: [],
         selectedId: null,
+        activeLayerId: data.layers[0]?.id ?? null,
+        editing: null,
       }),
 
     setModelLoaded: (name) => set({ hasModel: true, modelName: name }),
     setProjectName: (projectName) => set({ projectName }),
     setUnit: (unit) => set({ unit }),
 
-    setTool: (activeTool) => set({ activeTool, pendingPoints: [] }),
-    selectAnnotation: (selectedId) => set({ selectedId }),
+    setTool: (activeTool) =>
+      set((state) => ({ activeTool, pendingPoints: [], editing: activeTool === 'navigate' ? state.editing : null })),
+    selectAnnotation: (selectedId) =>
+      set((state) => ({ selectedId, editing: state.editing?.id === selectedId ? state.editing : null })),
+    setActiveLayer: (activeLayerId) => set({ activeLayerId }),
+    setAnnotationHidden: (id, hidden) =>
+      set((state) => ({
+        annotations: state.annotations.map((a) => (a.id === id ? { ...a, hidden } : a)),
+      })),
 
     addPendingPoint: (p) => {
       const state = get();
@@ -147,6 +209,13 @@ export const useAppStore = create<AppState>()((set, get) => {
       set({ pendingPoints: [] });
     },
 
+    completePath: () => {
+      const state = get();
+      if (state.activeTool !== 'path' || state.pendingPoints.length < 2) return;
+      createAnnotation('path', state.pendingPoints);
+      set({ pendingPoints: [] });
+    },
+
     addPointAnnotation: (p) => createAnnotation('point', [p]),
 
     updateAnnotation: (id, patch) =>
@@ -158,6 +227,7 @@ export const useAppStore = create<AppState>()((set, get) => {
       set((state) => ({
         annotations: state.annotations.filter((a) => a.id !== id),
         selectedId: state.selectedId === id ? null : state.selectedId,
+        editing: state.editing?.id === id ? null : state.editing,
       })),
 
     addLayer: (name, color) =>
@@ -187,6 +257,9 @@ export const useAppStore = create<AppState>()((set, get) => {
         layers: state.layers.filter((l) => l.id !== id),
         annotations: state.annotations.filter((a) => a.layerId !== id),
         selectedId: removedSelection ? null : state.selectedId,
+        editing: state.editing && state.annotations.some((a) => a.id === state.editing?.id && a.layerId === id)
+          ? null
+          : state.editing,
       });
     },
   };

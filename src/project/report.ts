@@ -23,7 +23,9 @@ function hexToRgb(hex: string): [number, number, number] {
 }
 
 function annotationValue(a: Annotation, unit: string): string | null {
-  if (a.kind === 'measure' && a.distance !== undefined) return `${formatValue(a.distance)} ${unit}`;
+  if ((a.kind === 'measure' || a.kind === 'path') && a.distance !== undefined) {
+    return `${formatValue(a.distance)} ${unit}`;
+  }
   if (a.kind === 'area' && a.area !== undefined) return `${formatValue(a.area)} ${unit}²`;
   return null;
 }

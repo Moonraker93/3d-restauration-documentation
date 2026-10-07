@@ -1,13 +1,15 @@
-import { Crosshair, Eye, EyeOff, MapPin, Pentagon, Plus, Ruler, Trash2 } from 'lucide-react';
+import { Check, Crosshair, Eye, EyeOff, MapPin, Pencil, Pentagon, Plus, Ruler, Spline, Target, Trash2, X } from 'lucide-react';
 import { useState, type KeyboardEvent } from 'react';
 import { useAppStore } from '../state/store';
 import { getSceneManager } from '../three/sceneHost';
 import { formatValue, kindName, type Annotation } from '../types/project';
 
-const KIND_ICONS = { point: MapPin, measure: Ruler, area: Pentagon } as const;
+const KIND_ICONS = { point: MapPin, measure: Ruler, path: Spline, area: Pentagon } as const;
 
 function annotationValueText(a: Annotation, unit: string): string | null {
-  if (a.kind === 'measure' && a.distance !== undefined) return `${formatValue(a.distance)} ${unit}`;
+  if ((a.kind === 'measure' || a.kind === 'path') && a.distance !== undefined) {
+    return `${formatValue(a.distance)} ${unit}`;
+  }
   if (a.kind === 'area' && a.area !== undefined) return `${formatValue(a.area)} ${unit}²`;
   return null;
 }
@@ -22,6 +24,9 @@ export function SidePanel() {
   const removeLayer = useAppStore((s) => s.removeLayer);
   const addLayer = useAppStore((s) => s.addLayer);
   const selectAnnotation = useAppStore((s) => s.selectAnnotation);
+  const activeLayerId = useAppStore((s) => s.activeLayerId);
+  const setActiveLayer = useAppStore((s) => s.setActiveLayer);
+  const setAnnotationHidden = useAppStore((s) => s.setAnnotationHidden);
 
   const [newLayerName, setNewLayerName] = useState('');
 
@@ -46,7 +51,7 @@ export function SidePanel() {
           {layers.map((layer) => {
             const count = annotations.filter((a) => a.layerId === layer.id).length;
             return (
-              <li key={layer.id} className="layer-row">
+              <li key={layer.id} className={`layer-row${layer.id === activeLayerId ? ' active' : ''}`}>
                 <input
                   type="color"
                   value={layer.color}
@@ -65,6 +70,14 @@ export function SidePanel() {
                   }}
                 />
                 <span className="layer-count">{count}</span>
+                <button
+                  className={`icon-btn${layer.id === activeLayerId ? ' active' : ''}`}
+                  title={layer.id === activeLayerId ? 'New annotations go to this layer' : 'Add new annotations to this layer'}
+                  aria-pressed={layer.id === activeLayerId}
+                  onClick={() => setActiveLayer(layer.id)}
+                >
+                  <Target size={15} />
+                </button>
                 <button
                   className="icon-btn"
                   title={layer.visible ? 'Hide layer' : 'Show layer'}
@@ -106,23 +119,39 @@ export function SidePanel() {
             if (items.length === 0) return null;
             return (
               <div key={layer.id} className="anno-group">
-                <div className="anno-group-header">
+                <div className={`anno-group-header${layer.visible ? '' : ' muted'}`}>
                   <span className="swatch" style={{ background: layer.color }} />
-                  {layer.name}
+                  <span className="anno-group-name">{layer.name}</span>
+                  <button
+                    className="icon-btn"
+                    title={layer.visible ? 'Hide whole layer' : 'Show whole layer'}
+                    onClick={() => updateLayer(layer.id, { visible: !layer.visible })}
+                  >
+                    {layer.visible ? <Eye size={14} /> : <EyeOff size={14} />}
+                  </button>
                 </div>
                 {items.map((a) => {
                   const Icon = KIND_ICONS[a.kind];
                   const value = annotationValueText(a, unit);
                   return (
-                    <button
+                    <div
                       key={a.id}
-                      className={`anno-row${a.id === selectedId ? ' selected' : ''}`}
-                      onClick={() => focusAnnotation(a)}
+                      className={`anno-item${a.hidden || !layer.visible ? ' muted' : ''}${a.id === selectedId ? ' selected' : ''}`}
                     >
-                      <Icon size={14} />
-                      <span className="anno-label-text">{a.label}</span>
-                      {value && <span className="anno-value">{value}</span>}
-                    </button>
+                      <button className="anno-row" onClick={() => focusAnnotation(a)}>
+                        <Icon size={14} />
+                        <span className="anno-label-text">{a.label}</span>
+                        {value && <span className="anno-value">{value}</span>}
+                      </button>
+                      <button
+                        className="icon-btn"
+                        title={a.hidden ? 'Show annotation' : 'Hide annotation'}
+                        aria-pressed={!a.hidden}
+                        onClick={() => setAnnotationHidden(a.id, !a.hidden)}
+                      >
+                        {a.hidden ? <EyeOff size={14} /> : <Eye size={14} />}
+                      </button>
+                    </div>
                   );
                 })}
               </div>
@@ -141,6 +170,11 @@ function AnnotationEditor({ annotation }: { annotation: Annotation }) {
   const unit = useAppStore((s) => s.unit);
   const updateAnnotation = useAppStore((s) => s.updateAnnotation);
   const removeAnnotation = useAppStore((s) => s.removeAnnotation);
+  const editing = useAppStore((s) => s.editing);
+  const startEditing = useAppStore((s) => s.startEditing);
+  const commitEditing = useAppStore((s) => s.commitEditing);
+  const cancelEditing = useAppStore((s) => s.cancelEditing);
+  const isEditing = editing?.id === annotation.id;
   const value = annotationValueText(annotation, unit);
 
   return (
@@ -178,6 +212,20 @@ function AnnotationEditor({ annotation }: { annotation: Annotation }) {
       </label>
       <div className="editor-meta">Created {new Date(annotation.createdAt).toLocaleString()}</div>
       <div className="editor-actions">
+        {isEditing ? (
+          <>
+            <button className="btn primary" onClick={commitEditing}>
+              <Check size={14} /> Confirm shape
+            </button>
+            <button className="btn" onClick={cancelEditing}>
+              <X size={14} /> Cancel
+            </button>
+          </>
+        ) : (
+          <button className="btn" onClick={() => startEditing(annotation.id)}>
+            <Pencil size={14} /> Edit shape
+          </button>
+        )}
         <button className="btn" onClick={() => getSceneManager()?.focusOn(annotation.points)}>
           <Crosshair size={14} /> Focus
         </button>

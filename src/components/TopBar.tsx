@@ -1,5 +1,6 @@
-import { Box, FileDown, FolderOpen, Save } from 'lucide-react';
-import { exportCurrentReport, openProjectPackage, pickFile, saveCurrentProject } from '../project/actions';
+import { Box, FileDown, FilePlus, FolderOpen, Save } from 'lucide-react';
+import { createProjectFromModel, exportCurrentReport, openProjectPackage, pickFile, saveCurrentProject } from '../project/actions';
+import { MODEL_ACCEPT } from '../three/loadModel';
 import { useAppStore } from '../state/store';
 import { PROJECT_EXTENSION } from '../types/project';
 
@@ -17,6 +18,12 @@ export function TopBar() {
   const onOpenProject = run(async () => {
     const file = await pickFile(`${PROJECT_EXTENSION},.zip`);
     if (file) await openProjectPackage(file);
+  });
+
+  const onNewProject = run(async () => {
+    if (hasModel && !window.confirm('Start a new project? Unsaved changes to the current project will be lost.')) return;
+    const file = await pickFile(MODEL_ACCEPT);
+    if (file) await createProjectFromModel(file);
   });
 
   return (
@@ -37,6 +44,9 @@ export function TopBar() {
         <input id="unit-input" value={unit} onChange={(e) => setUnit(e.target.value)} title="Unit label used in measurements and reports (e.g. m, cm, mm)" />
       </div>
       <div className="topbar-actions">
+        <button className="btn" onClick={onNewProject}>
+          <FilePlus size={16} /> New project
+        </button>
         <button className="btn" onClick={onOpenProject}>
           <FolderOpen size={16} /> Open project
         </button>

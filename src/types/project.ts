@@ -1,7 +1,7 @@
 export type Vec3Tuple = [number, number, number];
 
-export type Tool = 'navigate' | 'measure' | 'area' | 'annotate';
-export type AnnotationKind = 'point' | 'measure' | 'area';
+export type Tool = 'navigate' | 'measure' | 'path' | 'area' | 'annotate';
+export type AnnotationKind = 'point' | 'measure' | 'path' | 'area';
 
 export interface DamageLayer {
   id: string;
@@ -16,9 +16,11 @@ export interface Annotation {
   kind: AnnotationKind;
   label: string;
   notes: string;
-  /** Points in model coordinates. point: 1, measure: 2, area: 3+ */
+  /** Per-annotation visibility; missing (older projects) means visible. */
+  hidden?: boolean;
+  /** Points in model coordinates. point: 1, measure: 2, path: 2+, area: 3+ */
   points: Vec3Tuple[];
-  /** Cached derived value for kind === 'measure' (model units). */
+  /** Cached derived value for kind === 'measure' (straight-line) or 'path' (polyline length), in model units. */
   distance?: number;
   /** Cached derived value for kind === 'area' (square model units). */
   area?: number;
@@ -61,6 +63,13 @@ export function distance3D(a: Vec3Tuple, b: Vec3Tuple): number {
   return Math.hypot(a[0] - b[0], a[1] - b[1], a[2] - b[2]);
 }
 
+/** Total length of the open polyline through `points` (model units). */
+export function pathLength(points: Vec3Tuple[]): number {
+  let total = 0;
+  for (let i = 1; i < points.length; i++) total += distance3D(points[i - 1], points[i]);
+  return total;
+}
+
 /**
  * Surface-patch approximation of the region outlined by `points`:
  * area of the triangle fan (p0, pi, pi+1). Works for non-planar outlines.
@@ -84,6 +93,15 @@ export function polygonArea3D(points: Vec3Tuple[]): number {
   return area;
 }
 
+/** Returns `annotation` with new points and its cached distance/area recomputed. */
+export function withPoints(annotation: Annotation, points: Vec3Tuple[]): Annotation {
+  const next: Annotation = { ...annotation, points };
+  if (annotation.kind === 'measure' && points.length >= 2) next.distance = distance3D(points[0], points[1]);
+  if (annotation.kind === 'path' && points.length >= 2) next.distance = pathLength(points);
+  if (annotation.kind === 'area') next.area = polygonArea3D(points);
+  return next;
+}
+
 export function formatValue(value: number): string {
   if (!Number.isFinite(value)) return '—';
   const abs = Math.abs(value);
@@ -96,6 +114,7 @@ export function formatValue(value: number): string {
 export function kindName(kind: AnnotationKind): string {
   switch (kind) {
     case 'measure': return 'Measurement';
+    case 'path': return 'Path';
     case 'area': return 'Area';
     case 'point': return 'Note';
   }
