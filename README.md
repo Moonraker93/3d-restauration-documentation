@@ -73,6 +73,7 @@ model/<name>      # the original 3D model file
 
 - Measurements are straight-line (Euclidean); surface-geodesic distances are a possible future addition.
 - Area values are the sum of the triangle fan spanning the picked outline points (a surface-patch approximation).
+- Area overlays are projected onto the model surface so they follow curved geometry (if the projection is not possible, a flat patch is drawn instead), and use a small depth bias so they do not z-fight with the model.
 - LAS/LAZ and E57 laser-scan formats are not yet supported (convert to PLY/XYZ first).
 - Units are whatever your model uses; set the unit label (default `m`) in the top bar so reports read correctly.
 

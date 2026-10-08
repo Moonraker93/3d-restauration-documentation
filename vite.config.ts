@@ -1,5 +1,5 @@
 import { fileURLToPath } from 'node:url';
-import { defineConfig } from 'vite';
+import { defineConfig } from 'vitest/config';
 import react from '@vitejs/plugin-react';
 
 // jsPDF dynamically imports the optional "canvg" package for SVG rasterization,
@@ -20,5 +20,11 @@ export default defineConfig({
       usePolling: true,
       interval: 1000,
     },
+  },
+  // Unit tests run under Vitest; pure modules use the fast node environment and
+  // DOM-touching modules opt into jsdom per file via a `@vitest-environment` comment.
+  test: {
+    include: ['src/**/*.test.ts'],
+    environment: 'node',
   },
 });

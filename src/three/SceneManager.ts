@@ -4,6 +4,7 @@ import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 import { CSS2DObject, CSS2DRenderer } from 'three/addons/renderers/CSS2DRenderer.js';
 import { acceleratedRaycast, computeBoundsTree, disposeBoundsTree } from 'three-mesh-bvh';
 import { formatValue, pathLength, type Annotation, type DamageLayer, type Vec3Tuple } from '../types/project';
+import { outlineNormal, planeBasis, subdividePlanarTriangles } from './geometry';
 
 // Enable BVH-accelerated raycasting for fast picking on dense scans.
 THREE.BufferGeometry.prototype.computeBoundsTree = computeBoundsTree;
@@ -11,10 +12,26 @@ THREE.BufferGeometry.prototype.disposeBoundsTree = disposeBoundsTree;
 THREE.Mesh.prototype.raycast = acceleratedRaycast;
 
 const PENDING_COLOR = new THREE.Color('#22d3ee');
+/** Fallback color for annotations whose layer is missing. */
+const DEFAULT_ANNOTATION_COLOR = '#9ca3af';
 
 export interface PickResult {
   point: THREE.Vector3;
   normal: THREE.Vector3 | null;
+}
+
+/**
+ * A built annotation visual plus the inputs it was built from. `syncAnnotations`
+ * compares these against the incoming state to decide whether the group can be
+ * reused as-is instead of being disposed and rebuilt.
+ */
+interface AnnotationVisual {
+  group: THREE.Group;
+  annotation: Annotation;
+  /** Appearance inputs baked into the group — a change in any of them forces a rebuild. */
+  colorHex: string;
+  selected: boolean;
+  unit: string;
 }
 
 function disposeObject(root: THREE.Object3D): void {
@@ -112,6 +129,8 @@ export class SceneManager {
   private labelsDirty = true;
   private lastCameraMatrix = new THREE.Matrix4();
   private lastModelRoot: THREE.Group | null = null;
+  /** Annotation id → its built visual, so unchanged annotations are not rebuilt. */
+  private annotationVisuals = new Map<string, AnnotationVisual>();
 
   constructor(container: HTMLElement) {
     this.container = container;
@@ -251,26 +270,82 @@ export class SceneManager {
     };
   }
 
-  /** Rebuild all annotation visuals from state. Call whenever annotations/layers change. */
+  /**
+   * Sync annotation visuals with state, rebuilding only what actually changed.
+   *
+   * The store hands back the *same object reference* for every annotation/layer it
+   * did not touch, so an identity check — plus the appearance inputs baked into the
+   * built group — is enough to reuse a visual and skip the rebuild entirely.
+   */
   syncAnnotations(
     annotations: Annotation[],
     layers: DamageLayer[],
     selectedId: string | null,
     unit: string,
   ): void {
-    this.clearGroup(this.annotationRoot);
-    this.labelsDirty = true;
     const layerById = new Map(layers.map((l) => [l.id, l]));
+    const visible = new Map<string, { annotation: Annotation; colorHex: string; selected: boolean }>();
     for (const annotation of annotations) {
       const layer = layerById.get(annotation.layerId);
       if ((layer && !layer.visible) || annotation.hidden) continue;
-      const group = this.buildAnnotation(annotation, layer, annotation.id === selectedId, unit);
-      // Lets the UI map a clicked label back to its annotation.
-      group.traverse((obj) => {
-        if (obj instanceof CSS2DObject) obj.element.dataset.annotationId = annotation.id;
+      visible.set(annotation.id, {
+        annotation,
+        colorHex: layer?.color ?? DEFAULT_ANNOTATION_COLOR,
+        selected: annotation.id === selectedId,
       });
-      this.annotationRoot.add(group);
     }
+
+    let changed = false;
+
+    // Evict visuals whose annotation disappeared, was hidden, or lost its layer.
+    for (const [id, visual] of this.annotationVisuals) {
+      if (!visible.has(id)) {
+        this.removeAnnotationVisual(id, visual);
+        changed = true;
+      }
+    }
+
+    // Reuse untouched visuals; rebuild the ones whose inputs changed.
+    for (const [id, next] of visible) {
+      const cached = this.annotationVisuals.get(id);
+      if (
+        cached &&
+        cached.annotation === next.annotation &&
+        cached.colorHex === next.colorHex &&
+        cached.selected === next.selected &&
+        cached.unit === unit
+      ) {
+        continue;
+      }
+      if (cached) this.removeAnnotationVisual(id, cached);
+      this.addAnnotationVisual(id, next.annotation, next.colorHex, next.selected, unit);
+      changed = true;
+    }
+
+    // Only re-run the occlusion pass when the label set actually changed.
+    if (changed) this.labelsDirty = true;
+  }
+
+  private removeAnnotationVisual(id: string, visual: AnnotationVisual): void {
+    this.annotationRoot.remove(visual.group);
+    disposeObject(visual.group);
+    this.annotationVisuals.delete(id);
+  }
+
+  private addAnnotationVisual(
+    id: string,
+    annotation: Annotation,
+    colorHex: string,
+    selected: boolean,
+    unit: string,
+  ): void {
+    const group = this.buildAnnotation(annotation, colorHex, selected, unit);
+    // Lets the UI map a clicked label back to its annotation.
+    group.traverse((obj) => {
+      if (obj instanceof CSS2DObject) obj.element.dataset.annotationId = id;
+    });
+    this.annotationRoot.add(group);
+    this.annotationVisuals.set(id, { group, annotation, colorHex, selected, unit });
   }
 
   /** Show draggable node handles for shape editing (null clears them). */
@@ -352,6 +427,8 @@ export class SceneManager {
     this.resizeObserver?.disconnect();
     this.controls?.dispose();
     if (this.modelRoot) disposeObject(this.modelRoot);
+    // `disposeObject(annotationRoot)` releases every cached group, so just forget the entries.
+    this.annotationVisuals.clear();
     disposeObject(this.annotationRoot);
     disposeObject(this.pendingRoot);
     disposeObject(this.editRoot);
@@ -447,7 +524,36 @@ export class SceneManager {
     return label;
   }
 
-  private makeAreaFill(points: THREE.Vector3[], color: THREE.Color, opacity: number): THREE.Mesh {
+  /**
+   * Fill for an area outline. With `conform` the patch is projected onto the model
+   * surface so it follows curved geometry; otherwise (live preview, or a failed
+   * projection) it is a flat triangle fan through the outline points.
+   */
+  private makeAreaFill(
+    points: THREE.Vector3[],
+    color: THREE.Color,
+    opacity: number,
+    conform = false,
+  ): THREE.Mesh {
+    const geometry = (conform ? this.conformAreaToSurface(points) : null) ?? this.fanGeometry(points);
+    return new THREE.Mesh(
+      geometry,
+      new THREE.MeshBasicMaterial({
+        color,
+        transparent: true,
+        opacity,
+        side: THREE.DoubleSide,
+        depthWrite: false,
+        // A coplanar overlay z-fights with the surface without a depth bias.
+        polygonOffset: true,
+        polygonOffsetFactor: -2,
+        polygonOffsetUnits: -2,
+      }),
+    );
+  }
+
+  /** Flat triangle-fan fill through the outline points (fallback / live preview). */
+  private fanGeometry(points: THREE.Vector3[]): THREE.BufferGeometry {
     const positions = new Float32Array(points.length * 3);
     points.forEach((p, i) => {
       positions[i * 3] = p.x;
@@ -460,21 +566,94 @@ export class SceneManager {
     geometry.setAttribute('position', new THREE.BufferAttribute(positions, 3));
     geometry.setIndex(indices);
     geometry.computeVertexNormals(); // satisfy WebGPU TSL even though material is unlit
-    return new THREE.Mesh(
-      geometry,
-      new THREE.MeshBasicMaterial({ color, transparent: true, opacity, side: THREE.DoubleSide, depthWrite: false }),
-    );
+    return geometry;
   }
 
+  /**
+   * Build a surface-conforming fill for an area outline: flatten the outline into
+   * its best-fit plane, triangulate and subdivide it, then project every vertex
+   * back onto the model. Returns null when no usable projection exists, so the
+   * caller can fall back to the flat fan.
+   */
+  private conformAreaToSurface(points: THREE.Vector3[]): THREE.BufferGeometry | null {
+    if (!this.modelRoot) return null;
+    const normal = outlineNormal(points);
+    if (!normal) return null;
+    const { u, v } = planeBasis(normal);
+
+    const origin = points[0];
+    const flat = points.map((p) => {
+      const offset = p.clone().sub(origin);
+      return new THREE.Vector2(offset.dot(u), offset.dot(v));
+    });
+    const triangles = THREE.ShapeUtils.triangulateShape(flat, []);
+    if (triangles.length === 0) return null;
+
+    const maxEdge = Math.max(this.markerRadius * 6, this.modelRadius * 0.01);
+    const { positions, indices } = subdividePlanarTriangles(flat, triangles, maxEdge);
+
+    const array = new Float32Array(positions.length * 3);
+    positions.forEach((p, i) => {
+      const planar = origin.clone().addScaledVector(u, p.x).addScaledVector(v, p.y);
+      const snapped = this.snapToSurface(planar, normal) ?? planar;
+      array[i * 3] = snapped.x;
+      array[i * 3 + 1] = snapped.y;
+      array[i * 3 + 2] = snapped.z;
+    });
+
+    const geometry = new THREE.BufferGeometry();
+    geometry.setAttribute('position', new THREE.BufferAttribute(array, 3));
+    geometry.setIndex(indices);
+    geometry.computeVertexNormals(); // satisfy WebGPU TSL even though material is unlit
+    return geometry;
+  }
+
+  /**
+   * Nearest surface point hit along `+normal` or `-normal` from a planar position,
+   * or null when neither direction reaches the model. Testing both directions keeps
+   * the projection working for surfaces that fold either way relative to the plane.
+   */
+  private snapToSurface(position: THREE.Vector3, normal: THREE.Vector3): THREE.Vector3 | null {
+    if (!this.modelRoot) return null;
+    const savedNear = this.raycaster.near;
+    const savedFar = this.raycaster.far;
+    this.raycaster.near = 0;
+    this.raycaster.far = Infinity;
+
+    let best: THREE.Vector3 | null = null;
+    let bestDistance = Infinity;
+    for (const sign of [-1, 1]) {
+      const dir = normal.clone().multiplyScalar(sign);
+      // Start a little off the plane so the ray crosses the surface near `position`.
+      const start = position.clone().addScaledVector(dir, -this.markerRadius * 4);
+      this.raycaster.set(start, dir);
+      const hit = this.raycaster.intersectObject(this.modelRoot, true)[0];
+      if (!hit) continue;
+      const distance = hit.point.distanceTo(position);
+      if (distance < bestDistance) {
+        bestDistance = distance;
+        best = hit.point.clone();
+      }
+    }
+
+    this.raycaster.near = savedNear;
+    this.raycaster.far = savedFar;
+    return best;
+  }
+
+  /**
+   * Build the visuals for one annotation. Everything baked in here (`annotation`,
+   * `colorHex`, `selected`, `unit`) is part of the cache key used by
+   * `syncAnnotations` — add any new appearance input to both places.
+   */
   private buildAnnotation(
     annotation: Annotation,
-    layer: DamageLayer | undefined,
+    colorHex: string,
     selected: boolean,
     unit: string,
   ): THREE.Group {
     const group = new THREE.Group();
     group.name = `annotation-${annotation.id}`;
-    const colorHex = layer?.color ?? '#9ca3af';
     const color = new THREE.Color(colorHex);
     const points = annotation.points.map((p) => new THREE.Vector3(...p));
     const markerScale = selected ? 1.4 : 1;
@@ -513,7 +692,7 @@ export class SceneManager {
       // WebGPURenderer does not support THREE.LineLoop — use a closed Line instead.
       const outline = new THREE.BufferGeometry().setFromPoints([...points, points[0]]);
       group.add(new THREE.Line(outline, new THREE.LineBasicMaterial({ color })));
-      group.add(this.makeAreaFill(points, color, 0.3));
+      group.add(this.makeAreaFill(points, color, 0.3, true));
       const centroid = points.reduce((acc, p) => acc.add(p), new THREE.Vector3()).divideScalar(points.length);
       group.add(
         this.makeLabel(`${annotation.label} · ${formatValue(annotation.area ?? 0)} ${unit}²`, colorHex, centroid, selected),
